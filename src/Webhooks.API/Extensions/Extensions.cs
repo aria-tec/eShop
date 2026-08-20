@@ -1,4 +1,4 @@
-﻿internal static class Extensions
+internal static class Extensions
 {
     public static void AddApplicationServices(this IHostApplicationBuilder builder)
     {
@@ -10,6 +10,17 @@
         builder.AddNpgsqlDbContext<WebhooksContext>("webhooksdb");
 
         builder.Services.AddMigration<WebhooksContext>();
+
+        builder.Services.Configure<MiniSvixOptions>(builder.Configuration.GetSection("MiniSvix"));
+
+        builder.Services.AddHttpClient<IMiniSvixClient, MiniSvixClient>(client =>
+        {
+            var url = builder.Configuration["MiniSvix:Url"] 
+                      ?? builder.Configuration["services:minisvix-engine:http:0"] 
+                      ?? "http://localhost:8080";
+            client.BaseAddress = new Uri(url);
+            client.Timeout = TimeSpan.FromSeconds(5);
+        });
 
         builder.Services.AddTransient<IGrantUrlTesterService, GrantUrlTesterService>();
         builder.Services.AddTransient<IWebhooksRetriever, WebhooksRetriever>();

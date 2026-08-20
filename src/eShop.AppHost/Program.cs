@@ -1,4 +1,4 @@
-﻿using eShop.AppHost;
+using eShop.AppHost;
 
 var builder = DistributedApplication.CreateBuilder(args);
 
@@ -17,8 +17,32 @@ var catalogDb = postgres.AddDatabase("catalogdb");
 var identityDb = postgres.AddDatabase("identitydb");
 var orderDb = postgres.AddDatabase("orderingdb");
 var webhooksDb = postgres.AddDatabase("webhooksdb");
+var webhookEngineDb = postgres.AddDatabase("webhookenginedb", "webhook_db");
 
 var launchProfileName = ShouldUseHttpForEndpoints() ? "http" : "https";
+
+// 1. Mini-Svix Delivery Engine (Immutable OCI Container)
+var miniSvixEngine = builder.AddContainer("minisvix-engine", "mini-svix", "v1.0.0")
+    .WithReference(webhookEngineDb)
+    .WithReference(redis)
+    .WaitFor(postgres)
+    .WaitFor(redis)
+    .WithEnvironment("PORT", "8080")
+    .WithEnvironment("WORKER_COUNT", "10")
+    .WithEnvironment("ALLOW_LOCAL_DISPATCH", "true")
+    .WithHttpEndpoint(port: 8080, targetPort: 8080, name: "http")
+    .WithHttpHealthCheck("/healthz");
+
+// 2. Mock Webhook Receiver for Delivery Verification
+var mockReceiver = builder.AddContainer("mock-receiver", "mock-receiver", "v1.0.0")
+    .WithHttpEndpoint(port: 9090, targetPort: 9090, name: "http")
+    .WithHttpHealthCheck("/healthz");
+
+// 3. Mini-Svix Real-Time Operational Dashboard (with host gateway mapping for Nginx upstream)
+var miniSvixDashboard = builder.AddContainer("minisvix-dashboard", "minisvix-dashboard", "v1.0.0")
+    .WithContainerRuntimeArgs("--add-host", "engine:host-gateway")
+    .WaitFor(miniSvixEngine)
+    .WithHttpEndpoint(targetPort: 3000, name: "http");
 
 // Services
 var identityApi = builder.AddProject<Projects.Identity_API>("identity-api", launchProfileName)
@@ -55,7 +79,9 @@ builder.AddProject<Projects.PaymentProcessor>("payment-processor")
 var webHooksApi = builder.AddProject<Projects.Webhooks_API>("webhooks-api")
     .WithReference(rabbitMq).WaitFor(rabbitMq)
     .WithReference(webhooksDb)
-    .WithEnvironment("Identity__Url", identityEndpoint);
+    .WithEnvironment("Identity__Url", identityEndpoint)
+    .WithEnvironment("MiniSvix__Url", miniSvixEngine.GetEndpoint("http"))
+    .WaitFor(miniSvixEngine);
 
 // Reverse proxies
 builder.AddYarp("mobile-bff")

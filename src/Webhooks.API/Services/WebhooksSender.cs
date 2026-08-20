@@ -1,35 +1,46 @@
-﻿namespace Webhooks.API.Services;
+using System.Text.Json;
+using Webhooks.API.Model;
 
-public class WebhooksSender(IHttpClientFactory httpClientFactory, ILogger<WebhooksSender> logger) : IWebhooksSender
+namespace Webhooks.API.Services;
+
+public class WebhooksSender(IMiniSvixClient miniSvixClient, ILogger<WebhooksSender> logger) : IWebhooksSender
 {
     public async Task SendAll(IEnumerable<WebhookSubscription> receivers, WebhookData data)
     {
-        var client = httpClientFactory.CreateClient();
-        var json = JsonSerializer.Serialize(data);
-        var tasks = receivers.Select(r => OnSendData(r, json, client));
-        await Task.WhenAll(tasks);
-    }
-
-    private Task OnSendData(WebhookSubscription subs, string jsonData, HttpClient client)
-    {
-        var request = new HttpRequestMessage()
+        // Event type normalization for Mini-Svix
+        var eventType = data.Type switch
         {
-            RequestUri = new Uri(subs.DestUrl, UriKind.Absolute),
-            Method = HttpMethod.Post,
-            Content = new StringContent(jsonData, Encoding.UTF8, "application/json")
+            "OrderPaid" => "order.paid",
+            "OrderShipped" => "order.shipped",
+            "CatalogItemPriceChanged" => "catalog.price_changed",
+            _ => data.Type.ToLowerInvariant()
         };
 
-        if (!string.IsNullOrWhiteSpace(subs.Token))
+        object payloadObj;
+        try
         {
-            request.Headers.Add("X-eshop-whtoken", subs.Token);
+            payloadObj = JsonSerializer.Deserialize<JsonElement>(data.Payload);
+        }
+        catch
+        {
+            payloadObj = data.Payload;
         }
 
-        if (logger.IsEnabled(LogLevel.Debug))
+        // Extract deterministic Idempotency Key from IntegrationEvent.Id if present, else new Guid
+        var idempotencyKey = Guid.NewGuid();
+        if (payloadObj is JsonElement jsonElement)
         {
-            logger.LogDebug("Sending hook to {DestUrl} of type {Type}", subs.DestUrl, subs.Type);
+            if (jsonElement.TryGetProperty("Id", out var idProp) && idProp.TryGetGuid(out var guidVal))
+            {
+                idempotencyKey = guidVal;
+            }
+            else if (jsonElement.TryGetProperty("id", out var idLowerProp) && idLowerProp.TryGetGuid(out var guidLowerVal))
+            {
+                idempotencyKey = guidLowerVal;
+            }
         }
 
-        return client.SendAsync(request);
+        logger.LogInformation("Delegating webhook dispatch for event {EventType} (IdempotencyKey: {IdempotencyKey}) to Mini-Svix engine", eventType, idempotencyKey);
+        await miniSvixClient.IngestEventAsync(eventType, payloadObj, idempotencyKey);
     }
-
 }

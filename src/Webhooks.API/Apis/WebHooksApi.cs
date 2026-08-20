@@ -1,6 +1,7 @@
-﻿using System.Security.Claims;
+using System.Security.Claims;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Webhooks.API.Extensions;
+using Webhooks.API.Services;
 
 namespace Webhooks.API;
 
@@ -35,6 +36,8 @@ public static class WebHooksApi
         api.MapPost("/", async Task<Results<Created, BadRequest<string>>> (
             WebhookSubscriptionRequest request,
             IGrantUrlTesterService grantUrlTester,
+            IMiniSvixClient miniSvixClient,
+            ILogger<WebhooksSender> logger,
             WebhooksContext context,
             ClaimsPrincipal user) =>
         {
@@ -53,6 +56,16 @@ public static class WebHooksApi
 
                 context.Add(subscription);
                 await context.SaveChangesAsync();
+
+                try
+                {
+                    // Sync endpoint to Mini-Svix delivery engine
+                    await miniSvixClient.CreateEndpointAsync(request.Url, request.Token ?? "whsec_eshop_secret_key", 100);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to sync webhook endpoint {Url} to Mini-Svix engine directly on registration", request.Url);
+                }
 
                 return TypedResults.Created($"/api/webhooks/{subscription.Id}");
             }
